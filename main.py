@@ -112,8 +112,13 @@ def main():
     try:
         if not args.no_gui:
             logger.info("Starting LED Simulator...")
-            active_scene = light_scenes[1]
-            simulator = LEDSimulator(scene=active_scene)
+            from models.scene_manager import SceneManager
+            
+            scene_manager = SceneManager()
+            for scene_id, scene in light_scenes.items():
+                scene_manager.add_scene(scene_id, scene)
+            
+            simulator = LEDSimulator(scene_manager=scene_manager)
             simulator.ui_state['scale_factor'] = args.scale_factor
             
             if os.path.exists(japanese_font):

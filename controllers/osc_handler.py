@@ -21,6 +21,7 @@ from config import (
     DEFAULT_DIMMER_TIME,
     IN_PORT,
     OUT_PORT,
+    MAX_SEGMENTS
 )
 
 
@@ -310,8 +311,10 @@ class OSCHandler:
         effect = scene.effects[effect_id]
         
         if isinstance(palette_id, str) and palette_id in scene.palettes:
-            effect.current_palette_ID = palette_id
-            logger.info(f"Set palette for effect {effect_id} in scene {scene_id} to {palette_id}")
+            effect.current_palette = palette_id
+            for segment in effect.segments.values():
+                if hasattr(segment, 'calculate_rgb'):
+                    segment.rgb_color = segment.calculate_rgb(palette_id)
             
             if self.simulator:
                 self._update_simulator(scene_id, effect_id)
@@ -328,6 +331,7 @@ class OSCHandler:
             address: OSC address pattern
             *args: OSC message arguments (segment_ID)
         """
+
         pattern = r"/scene/(\d+)/effect/(\d+)/add_segment"
         match = re.match(pattern, address)
         
@@ -360,6 +364,12 @@ class OSCHandler:
             return
             
         effect = scene.effects[effect_id]
+        
+        if len(effect.segments) >= MAX_SEGMENTS:
+            logger.warning(f"Maximum segment limit ({MAX_SEGMENTS}) reached for effect {effect_id}")
+            if self.simulator and hasattr(self.simulator, '_add_notification'):
+                self.simulator._add_notification(f"Đã đạt giới hạn tối đa {MAX_SEGMENTS} segment")
+            return
         
         while segment_id in effect.segments:
             segment_id += 1
@@ -394,14 +404,14 @@ class OSCHandler:
             if self.simulator:
                 self._update_simulator(scene_id, effect_id, segment_id)
                 if hasattr(self.simulator, '_add_notification'):
-                    self.simulator._add_notification(f"Đã thêm segment {segment_id} vào effect {effect_id}")
+                    self.simulator._add_notification(f"Added segment {segment_id} into effect {effect_id}")
             
             self.client.send_message(f"/scene/{scene_id}/effect/{effect_id}/segment_added", segment_id)
             
         except Exception as e:
             logger.error(f"Error adding segment: {e}")
             if self.simulator and hasattr(self.simulator, '_add_notification'):
-                self.simulator._add_notification(f"Lỗi khi thêm segment: {e}")
+                self.simulator._add_notification(f"Error while adding segment: {e}")
 
     def scene_effect_remove_segment_callback(self, address, *args):
         """
@@ -957,6 +967,10 @@ class OSCHandler:
             address: OSC address pattern
             *args: OSC message arguments (scene_ID)
         """
+        if len(self.light_scenes) <= 1:
+            logger.warning("Cannot remove the last remaining scene")
+            return
+        
         if address != "/scene_manager/remove_scene" or not args:
             return
             

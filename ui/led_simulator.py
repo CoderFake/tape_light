@@ -449,23 +449,6 @@ class LEDSimulator:
         )
         current_x += int(90 * scale)
 
-        self.ui_elements['add_scene_button'] = pygame_gui.elements.UIButton(
-            relative_rect=pygame.Rect(current_x, row1_y, int(40 * scale), button_height),
-            text='+',
-            manager=self.manager,
-            tool_tip_text="Add New Scene"
-        )
-        current_x += int(45 * scale)
-
-        self.ui_elements['remove_scene_button'] = pygame_gui.elements.UIButton(
-            relative_rect=pygame.Rect(current_x, row1_y, int(40 * scale), button_height),
-            text='-',
-            manager=self.manager,
-            tool_tip_text="Remove Current Scene"
-        )
-        current_x += int(50 * scale)
-
-        current_x = int(10 * scale)
 
         self.ui_elements['save_button'] = pygame_gui.elements.UIButton(
             relative_rect=pygame.Rect(current_x, row2_y, button_width, button_height),
@@ -818,6 +801,48 @@ class LEDSimulator:
                 container=control_panel
             )
 
+            current_y += int(50 * scale)  
+
+            pygame_gui.elements.UITextBox(
+                relative_rect=pygame.Rect(
+                    (panel_width - label_width) // 2,
+                    current_y, 
+                    label_width, 
+                    int(25 * scale)
+                ),
+                html_text='Add/remove scene:',
+                manager=self.manager,
+                container=control_panel
+            )
+
+            current_y += int(30 * scale)
+
+            self.ui_elements['add_scene'] = pygame_gui.elements.UIButton(
+                relative_rect=pygame.Rect(  
+                    int(120 * scale),
+                    current_y, 
+                    button_width, 
+                    int(25 * scale)
+                ),
+                text='Add Scene',
+                manager=self.manager,
+                container=control_panel
+            )
+
+            current_y += int(35 * scale)
+
+            self.ui_elements['remove_scene'] = pygame_gui.elements.UIButton(
+                relative_rect=pygame.Rect(
+                    int(120 * scale),
+                    current_y, 
+                    button_width, 
+                    int(25 * scale)
+                ),
+                text='Remove Scene',
+                manager=self.manager,
+                container=control_panel
+            )
+
     def _build_top_panel_one_row(self):
         scale = self.ui_state['scale_factor']
         row_y = int(10 * scale)
@@ -913,22 +938,6 @@ class LEDSimulator:
             manager=self.manager
         )
         current_x += int(90 * scale)
-
-        self.ui_elements['add_scene_button'] = pygame_gui.elements.UIButton(
-            relative_rect=pygame.Rect(current_x, row_y, int(40 * scale), button_height),
-            text='+',
-            manager=self.manager,
-            tool_tip_text="Add New Scene"
-        )
-        current_x += int(45 * scale)
-
-        self.ui_elements['remove_scene_button'] = pygame_gui.elements.UIButton(
-            relative_rect=pygame.Rect(current_x, row_y, int(40 * scale), button_height),
-            text='-',
-            manager=self.manager,
-            tool_tip_text="Remove Current Scene"
-        )
-        current_x += int(50 * scale) 
 
         button_width = int(90 * scale)
         
@@ -1038,11 +1047,9 @@ class LEDSimulator:
             self.ui_state['control_panel_expanded'] = not self.ui_state['control_panel_expanded']
             self.ui_dirty = True
         
-
         elif event.ui_element == self.ui_elements.get('play_button'):
             self.is_playing = not self.is_playing
             event.ui_element.set_text('Pause' if self.is_playing else 'Play')
-        
 
         elif event.ui_element == self.ui_elements.get('zoom_in'):
             self.led_state['zoom'] = min(10.0, self.led_state['zoom'] * 1.2)
@@ -1057,11 +1064,9 @@ class LEDSimulator:
         elif event.ui_element == self.ui_elements.get('center_view'):
             self._center_view()
         
-
         elif event.ui_element == self.ui_elements.get('show_indicators'):
             self.led_state['show_segment_indicators'] = not self.led_state['show_segment_indicators']
             event.ui_element.set_text(f"Guide: {'ON' if self.led_state['show_segment_indicators'] else 'OFF'}")
-        
 
         elif event.ui_element in [self.ui_elements.get('fade_toggle'), self.ui_elements.get('fade_toggle_2')]:
             segment = self._get_active_segment()
@@ -1089,7 +1094,6 @@ class LEDSimulator:
                     segment.gradient_colors = [1, 0, 1] 
                 
                 event.ui_element.set_text('ON' if segment.gradient else 'OFF')
-        
 
         elif event.ui_element == self.ui_elements.get('reflect_toggle'):
             segment = self._get_active_segment()
@@ -1151,22 +1155,26 @@ class LEDSimulator:
         elif event.ui_element == self.ui_elements.get('load_button'):
             self._load_json_config()
 
-        elif event.ui_element == self.ui_elements.get('add_scene_button'):
-            if self.scene_manager:
-                new_scene_id = 1
-                while new_scene_id in self.scene_manager.scenes:
-                    new_scene_id += 1
+        elif event.ui_element == self.ui_elements.get('add_scene'):
+            if not self.scene_manager:
+                from models.scene_manager import SceneManager
+                self.scene_manager = SceneManager()
+                if self.scene:
+                    self.scene_manager.add_scene(self.scene.scene_ID, self.scene)
+                    self.active_scene_id = self.scene.scene_ID
+                    
+            new_scene_id = 1
+            while new_scene_id in self.scene_manager.scenes:
+                new_scene_id += 1
                 
-                new_scene = self.scene_manager.create_new_scene(new_scene_id)
-                self.scene_manager.switch_scene(new_scene_id)
-                self.scene = self.scene_manager.scenes[new_scene_id]
-                self.active_scene_id = new_scene_id
-                self.ui_dirty = True
-                self._add_notification(f"Added scene {new_scene_id}")
-            else:
-                self._add_notification("Scene Manager not available.")
+            new_scene = self.scene_manager.create_new_scene(new_scene_id)
+            self.scene_manager.switch_scene(new_scene_id)
+            self.scene = self.scene_manager.scenes[new_scene_id]
+            self.active_scene_id = new_scene_id
+            self.ui_dirty = True
+            self._add_notification(f"Added scene {new_scene_id}")
 
-        elif event.ui_element == self.ui_elements.get('remove_scene_button'):
+        elif event.ui_element == self.ui_elements.get('remove_scene'):
             if self.scene_manager:
                 if len(self.scene_manager.scenes) <= 1:
                     self._add_notification("Can not delete the last scene")
@@ -1185,10 +1193,10 @@ class LEDSimulator:
                         self.scene = None
                         self.active_scene_id = None
                         self.ui_dirty = True
-                        self._add_notification(f"Removed scene {scene_to_remove}")
+                        self._add_notification(f"Remove scene {scene_to_remove}")
             else:
-                self._add_notification("Scene Manager not available.")
-    
+                self._add_notification("No Scene Manager")
+        
     def _handle_slider_moved(self, event):
         segment = self._get_active_segment()
         if not segment:
