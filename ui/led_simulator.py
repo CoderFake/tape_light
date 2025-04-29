@@ -124,7 +124,7 @@ class LEDSimulator:
         self._apply_scale_factor()
         
         self.fade_visualizer = {
-            'show': False,
+            'show': True,
             'position': 0,
             'width': 200,
             'height': 40
@@ -448,7 +448,23 @@ class LEDSimulator:
             manager=self.manager
         )
         current_x += int(90 * scale)
-    
+
+        self.ui_elements['add_scene_button'] = pygame_gui.elements.UIButton(
+            relative_rect=pygame.Rect(current_x, row1_y, int(40 * scale), button_height),
+            text='+',
+            manager=self.manager,
+            tool_tip_text="Add New Scene"
+        )
+        current_x += int(45 * scale)
+
+        self.ui_elements['remove_scene_button'] = pygame_gui.elements.UIButton(
+            relative_rect=pygame.Rect(current_x, row1_y, int(40 * scale), button_height),
+            text='-',
+            manager=self.manager,
+            tool_tip_text="Remove Current Scene"
+        )
+        current_x += int(50 * scale)
+
         current_x = int(10 * scale)
 
         self.ui_elements['save_button'] = pygame_gui.elements.UIButton(
@@ -898,6 +914,22 @@ class LEDSimulator:
         )
         current_x += int(90 * scale)
 
+        self.ui_elements['add_scene_button'] = pygame_gui.elements.UIButton(
+            relative_rect=pygame.Rect(current_x, row_y, int(40 * scale), button_height),
+            text='+',
+            manager=self.manager,
+            tool_tip_text="Add New Scene"
+        )
+        current_x += int(45 * scale)
+
+        self.ui_elements['remove_scene_button'] = pygame_gui.elements.UIButton(
+            relative_rect=pygame.Rect(current_x, row_y, int(40 * scale), button_height),
+            text='-',
+            manager=self.manager,
+            tool_tip_text="Remove Current Scene"
+        )
+        current_x += int(50 * scale) 
+
         button_width = int(90 * scale)
         
         self.ui_elements['save_button'] = pygame_gui.elements.UIButton(
@@ -1118,6 +1150,44 @@ class LEDSimulator:
         
         elif event.ui_element == self.ui_elements.get('load_button'):
             self._load_json_config()
+
+        elif event.ui_element == self.ui_elements.get('add_scene_button'):
+            if self.scene_manager:
+                new_scene_id = 1
+                while new_scene_id in self.scene_manager.scenes:
+                    new_scene_id += 1
+                
+                new_scene = self.scene_manager.create_new_scene(new_scene_id)
+                self.scene_manager.switch_scene(new_scene_id)
+                self.scene = self.scene_manager.scenes[new_scene_id]
+                self.active_scene_id = new_scene_id
+                self.ui_dirty = True
+                self._add_notification(f"Added scene {new_scene_id}")
+            else:
+                self._add_notification("Scene Manager not available.")
+
+        elif event.ui_element == self.ui_elements.get('remove_scene_button'):
+            if self.scene_manager:
+                if len(self.scene_manager.scenes) <= 1:
+                    self._add_notification("Can not delete the last scene")
+                else:
+                    scene_to_remove = self.active_scene_id
+                    self.scene_manager.remove_scene(scene_to_remove)
+                    
+                    if self.scene_manager.scenes:
+                        new_scene_id = min(self.scene_manager.scenes.keys())
+                        self.scene_manager.switch_scene(new_scene_id)
+                        self.scene = self.scene_manager.scenes[new_scene_id]
+                        self.active_scene_id = new_scene_id
+                        self.ui_dirty = True
+                        self._add_notification(f"Removed {scene_to_remove} and switched scene {new_scene_id}")
+                    else:
+                        self.scene = None
+                        self.active_scene_id = None
+                        self.ui_dirty = True
+                        self._add_notification(f"Removed scene {scene_to_remove}")
+            else:
+                self._add_notification("Scene Manager not available.")
     
     def _handle_slider_moved(self, event):
         segment = self._get_active_segment()
@@ -1191,6 +1261,7 @@ class LEDSimulator:
                     if effect and effect.segments:
                         self.active_segment_id = min(effect.segments.keys())
                 self.ui_dirty = True
+                self._add_notification(f"Switch to scene {scene_id}")
         
         elif event.ui_element == self.ui_elements.get('effect_dropdown'):
             effect_id = int(event.text)
@@ -1202,11 +1273,15 @@ class LEDSimulator:
                 if effect.segments:
                     self.active_segment_id = min(effect.segments.keys())
                 self.ui_dirty = True
+                self._add_notification(f"Switch to effect {effect_id}")
         
         elif event.ui_element == self.ui_elements.get('palette_dropdown'):
             palette_id = event.text
             if palette_id in self.scene.palettes:
+                old_palette = self.scene.current_palette
                 self.scene.set_palette(palette_id)
+                self.ui_dirty = True
+                self._add_notification(f"Switch from {old_palette} to {palette_id}")
 
         elif event.ui_element == self.ui_elements.get('segment_dropdown'):
             segment_id = int(event.text)
@@ -1237,15 +1312,28 @@ class LEDSimulator:
             if filename:
                 if self.scene_manager:
                     if self.active_scene_id in self.scene_manager.scenes:
-                        self.scene_manager.scenes[self.active_scene_id].save_to_json(filename)
+                        scene = self.scene_manager.scenes[self.active_scene_id]
+                        for effect in scene.effects.values():
+                            effect.time = 0.0
+                            for segment in effect.segments.values():
+                                if hasattr(segment, 'time'):
+                                    segment.time = 0.0
+                        
+                        scene.save_to_json(filename)
                     else:
                         self.scene_manager.save_scenes_to_json(filename)
                 else:
+                    for effect in self.scene.effects.values():
+                        effect.time = 0.0
+                        for segment in effect.segments.values():
+                            if hasattr(segment, 'time'):
+                                segment.time = 0.0
+                                
                     self.scene.save_to_json(filename)
                 
-                self._add_notification(f"Saved Config: {filename}")
+                self._add_notification(f"Config Saved: {filename}")
         except Exception as e:
-            self._add_notification(f"Error while saving {str(e)}")
+            self._add_notification(f"Error While Saving: {str(e)}")
     
     def _load_json_config(self):
         try:
@@ -1263,7 +1351,6 @@ class LEDSimulator:
                         self.scene = self.scene_manager.scenes[scene_id]
                         self.active_scene_id = scene_id
                     except:
-
                         from models.light_scene import LightScene
                         new_scene = LightScene.load_from_json(filename)
                         self.scene_manager.scenes[new_scene.scene_ID] = new_scene
@@ -1275,17 +1362,22 @@ class LEDSimulator:
                     self.scene = LightScene.load_from_json(filename)
                     self.active_scene_id = self.scene.scene_ID
                 
-
                 if self.scene.effects:
+                    for effect in self.scene.effects.values():
+                        effect.time = 0.0
+                        for segment in effect.segments.values():
+                            if hasattr(segment, 'time'):
+                                segment.time = 0.0
+                    
                     self.active_effect_id = self.scene.current_effect_ID or min(self.scene.effects.keys())
                     effect = self.scene.effects.get(self.active_effect_id)
                     if effect and effect.segments:
                         self.active_segment_id = min(effect.segments.keys())
                 
                 self.ui_dirty = True
-                self._add_notification(f"Loaded config {filename}")
+                self._add_notification(f"Loaded Config {filename}")
         except Exception as e:
-            self._add_notification(f"Error while loading {str(e)}")
+            self._add_notification(f"Error While Loading: {str(e)}")
     
     def _add_notification(self, message, duration=3.0):
         self.notifications.append({
@@ -1547,41 +1639,49 @@ class LEDSimulator:
         if self.ui_state['resizing'] and time.time() - self.ui_state['resize_time'] > 0.2:
             self.ui_state['resizing'] = False
             self.ui_dirty = True
-    
+
     def _draw_segment_indicators(self, display_rect, led_total_width, pan_offset):
-        if self.active_effect_id not in self.scene.effects:
-            return
-        
+        if not self.scene or self.active_effect_id not in self.scene.effects:
+             return
+
         effect = self.scene.effects[self.active_effect_id]
-        
+
         for segment_id, segment in effect.segments.items():
-            total_length = sum(segment.length) if hasattr(segment, 'length') else 0
-            segment_start = segment.current_position - total_length // 2
-            segment_end = segment.current_position + total_length // 2
-            
-            alpha_surface = pygame.Surface((
-                (segment_end - segment_start) * led_total_width,
-                display_rect.height
-            ), pygame.SRCALPHA)
-            
-            color = (
-                (255, 50, 50) if segment_id == self.active_segment_id else (50, 50, 255)
-            )
-            
-            color_with_alpha = (*color, self.led_state['segment_indicator_opacity'])
-            
-            alpha_surface.fill(color_with_alpha)
-            
-            indicator_x = display_rect.x + segment_start * led_total_width + pan_offset
-            
-            self.screen.blit(alpha_surface, (indicator_x, display_rect.y))
-            
-            text = f"S{segment_id}"
-            text_surface = self._render_text(text, 20, (255, 255, 255))
-            self.screen.blit(text_surface, (
-                indicator_x + 5, 
-                display_rect.y + 5
-            ))
+            total_length_leds = sum(segment.length) if hasattr(segment, 'length') else 0
+            if total_length_leds <= 0:
+                continue
+
+            segment_start_pos = segment.current_position
+
+            indicator_start_x = display_rect.x + segment_start_pos * led_total_width + pan_offset
+            indicator_width = total_length_leds * led_total_width
+
+            if indicator_start_x + indicator_width > display_rect.x and indicator_start_x < display_rect.right:
+
+                alpha_surface = pygame.Surface((
+                    max(1, int(indicator_width)),
+                    display_rect.height
+                ), pygame.SRCALPHA)
+
+                color = (
+                    (255, 50, 50) if segment_id == self.active_segment_id else (50, 50, 255)
+                )
+                color_with_alpha = (*color, self.led_state['segment_indicator_opacity'])
+                alpha_surface.fill(color_with_alpha)
+
+                self.screen.blit(alpha_surface, (int(indicator_start_x), display_rect.y))
+
+                text = f"S{segment_id}"
+                text_surface = self._render_text(text, 12, (255, 255, 255))
+
+                text_x = indicator_start_x + 5
+                text_y = display_rect.y + 5
+                if text_x + text_surface.get_width() > indicator_start_x + indicator_width:
+                     text_x = indicator_start_x + indicator_width - text_surface.get_width() - 5
+
+                text_x = max(indicator_start_x + 2, text_x)
+
+                self.screen.blit(text_surface, (text_x, text_y))
 
     def _draw_leds(self):
         display_rect = self.rects['display']

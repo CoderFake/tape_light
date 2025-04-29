@@ -36,11 +36,16 @@ class LightEffect:
         Args:
             palette_id: ID of the palette to use
         """
+        import logging
+        logger = logging.getLogger("color_signal_system")
+        logger.info(f"Effect {self.effect_ID} setting palette to: {palette_id}")
+        
         self.current_palette = palette_id
         
-
         for segment in self.segments.values():
-            segment.rgb_color = segment.calculate_rgb(self.current_palette)
+            if hasattr(segment, 'calculate_rgb'):
+                segment.rgb_color = segment.calculate_rgb(self.current_palette)
+                logger.info(f"Updated segment {segment.segment_ID} colors with palette {palette_id}")
         
     def add_segment(self, segment_ID: int, segment: LightSegment):
         """
@@ -51,6 +56,9 @@ class LightEffect:
             segment: LightSegment instance to add
         """
         self.segments[segment_ID] = segment
+        
+        if hasattr(segment, 'calculate_rgb'):
+            segment.rgb_color = segment.calculate_rgb(self.current_palette)
         
     def remove_segment(self, segment_ID: int):
         """
@@ -94,69 +102,38 @@ class LightEffect:
         """
 
         led_colors = [[0, 0, 0] for _ in range(self.led_count)]
-        led_transparency = [1.0 for _ in range(self.led_count)]
+        led_transparency = [0.0 for _ in range(self.led_count)] 
         
-        sorted_segments = sorted(self.segments.items(), key=lambda x: x[0])
-        
+        from config import DEFAULT_COLOR_PALETTES
+        palette = DEFAULT_COLOR_PALETTES.get(self.current_palette, DEFAULT_COLOR_PALETTES["A"])
+
+        sorted_segments = sorted(self.segments.items(), key=lambda item: item[0])
+
         for segment_id, segment in sorted_segments:
-            segment_data = segment.get_light_data(self.current_palette)
-            
-            if segment_data['brightness'] <= 0:
-                continue
-                
-            positions = segment_data['positions']
-            colors = segment_data['colors']
-            transparency = segment_data['transparency']
-            
-            start_pos = max(0, int(positions[0]))
-            end_pos = min(self.led_count - 1, int(positions[3]))
-            
-            for led_idx in range(start_pos, end_pos + 1):
-                if led_idx < 0 or led_idx >= self.led_count:
-                    continue
+            segment_light_data = segment.get_light_data(palette)
 
-                if led_idx <= positions[1]:
-                    rel_pos = (led_idx - positions[0]) / max(1, positions[1] - positions[0])
-                    trans_idx = 0
-                    color1 = colors[0]
-                    color2 = colors[1]
+            for led_idx, (segment_color, segment_transparency) in segment_light_data.items():
+                if 0 <= led_idx < self.led_count:
                     
-                elif led_idx <= positions[2]:
-                    rel_pos = (led_idx - positions[1]) / max(1, positions[2] - positions[1])
-                    trans_idx = 1
-                    color1 = colors[1]
-                    color2 = colors[2]
-                    
-                else:
-                    rel_pos = (led_idx - positions[2]) / max(1, positions[3] - positions[2])
-                    trans_idx = 2
-                    color1 = colors[2]
-                    color2 = colors[3]
+                    current_led_color = led_colors[led_idx]
+                    current_led_transparency = led_transparency[led_idx] 
 
-                from utils.color_utils import interpolate_colors
-                led_color = interpolate_colors(color1, color2, rel_pos)
-                current_transparency = transparency[trans_idx]
+                    final_transparency = segment_transparency + current_led_transparency * (1.0 - segment_transparency)
+                    final_transparency = max(0.0, min(1.0, final_transparency)) # Clamp to [0, 1]
 
-                if led_colors[led_idx] == [0, 0, 0]:
-                    led_colors[led_idx] = led_color
-                    led_transparency[led_idx] = current_transparency
-                else:
-                    weight_current = led_transparency[led_idx]
-                    weight_new = current_transparency * (1.0 - led_transparency[led_idx])
-                    total_weight = weight_current + weight_new
-                    
-                    if total_weight > 0:
-                        weight_current /= total_weight
-                        weight_new /= total_weight
+                    final_color = [0, 0, 0]
+                    if final_transparency > 1e-6: 
+                        for i in range(3): 
+                            final_color[i] = int(
+                                (segment_color[i] * segment_transparency + 
+                                 current_led_color[i] * current_led_transparency * (1.0 - segment_transparency)) / final_transparency
+                            )
+                        final_color = [max(0, min(255, c)) for c in final_color]
+                    else:
+                        final_color = [0, 0, 0] 
 
-                        led_colors[led_idx] = blend_colors(
-                            [led_colors[led_idx], led_color],
-                            [weight_current, weight_new]
-                        )
-
-                    led_transparency[led_idx] = max(0.0, min(1.0, 
-                        led_transparency[led_idx] + current_transparency * (1.0 - led_transparency[led_idx])
-                    ))
+                    led_colors[led_idx] = final_color
+                    led_transparency[led_idx] = final_transparency
         
         return led_colors
         
@@ -175,7 +152,7 @@ class LightEffect:
             "effect_ID": self.effect_ID,
             "led_count": self.led_count,
             "fps": self.fps,
-            "time": self.time,
+            "time": 0.0,
             "current_palette": self.current_palette,
             "segments": segments_dict
         }
@@ -197,9 +174,6 @@ class LightEffect:
             fps=data["fps"]
         )
         
-        if "time" in data:
-            effect.time = data["time"]
-            
         if "current_palette" in data:
             effect.current_palette = data["current_palette"]
             

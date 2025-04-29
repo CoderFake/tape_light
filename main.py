@@ -19,7 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger("color_signal_system")
 
 from config import (
-    DEFAULT_FPS, DEFAULT_LED_COUNT, DEFAULT_OSC_PORT, DEFAULT_OSC_IP,
+    DEFAULT_FPS, DEFAULT_LED_COUNT, IN_PORT, OUT_PORT, DEFAULT_OSC_IP,
     DEFAULT_TRANSPARENCY, DEFAULT_LENGTH, DEFAULT_MOVE_SPEED,
     DEFAULT_MOVE_RANGE, DEFAULT_IS_EDGE_REFLECT,
     DEFAULT_DIMMER_TIME, DEFAULT_DIMMER_TIME_RATIO
@@ -62,7 +62,8 @@ def parse_arguments():
     parser.add_argument('--fps', type=int, default=DEFAULT_FPS, help=f'Frames per second (default: {DEFAULT_FPS})')
     parser.add_argument('--led-count', type=int, default=DEFAULT_LED_COUNT, help=f'Number of LEDs (default: {DEFAULT_LED_COUNT})')
     parser.add_argument('--osc-ip', type=str, default=DEFAULT_OSC_IP, help=f'OSC IP address (default: {DEFAULT_OSC_IP})')
-    parser.add_argument('--osc-port', type=int, default=DEFAULT_OSC_PORT, help=f'OSC port (default: {DEFAULT_OSC_PORT})')
+    parser.add_argument('--in-port', type=int, default=IN_PORT, help=f'Input OSC port (default: {IN_PORT})')
+    parser.add_argument('--out-port', type=int, default=OUT_PORT, help=f'Output OSC port (default: {OUT_PORT})')
     parser.add_argument('--no-gui', action='store_true', help='Run without GUI')
     parser.add_argument('--simulator-only', action='store_true', help='Run only the simulator without OSC')
     parser.add_argument('--config-file', type=str, help='Load configuration from a JSON file')
@@ -74,7 +75,7 @@ def main():
     args = parse_arguments()
     
     logger.info("Initializing Color Signal Generation System...")
-    logger.info(f"FPS: {args.fps}, LED Count: {args.led_count}, OSC: {args.osc_ip}:{args.osc_port}")
+    logger.info(f"FPS: {args.fps}, LED Count: {args.led_count}, OSC: {args.osc_ip}:{args.in_port}:{args.out_port}")
     
     light_scenes = {}
     
@@ -105,7 +106,7 @@ def main():
     
     osc_handler = None
     if not args.simulator_only:
-        osc_handler = OSCHandler(light_scenes, ip=args.osc_ip, port=args.osc_port)
+        osc_handler = OSCHandler(light_scenes, ip=args.osc_ip, in_port=args.in_port, out_port=args.out_port)
         osc_handler.start_server()
     
     try:

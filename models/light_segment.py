@@ -35,13 +35,20 @@ class LightSegment:
         self.transparency = transparency
         self.length = length
         self.move_speed = move_speed
-        self.move_range = move_range
+        
+        if move_range and len(move_range) >= 2:
+            self.move_range = [min(move_range[0], move_range[1]), max(move_range[0], move_range[1])]
+        else:
+            self.move_range = move_range
+            
         self.initial_position = initial_position
         self.current_position = float(initial_position)
         self.is_edge_reflect = is_edge_reflect
         self.dimmer_time = dimmer_time
         self.dimmer_time_ratio = dimmer_time_ratio
         self.time = 0.0
+        
+        self.direction = 1 if move_speed >= 0 else -1
         
         self.gradient = False
         self.fade = False
@@ -69,14 +76,27 @@ class LightSegment:
             self.gradient = value
             if self.gradient and self.gradient_colors[0] == 0:
                 self.gradient_colors[0] = 1
+        elif param_name == 'move_range':
+            if value and len(value) >= 2:
+                self.move_range = [min(value[0], value[1]), max(value[0], value[1])]
+                
+                if self.current_position < self.move_range[0]:
+                    self.current_position = self.move_range[0]
+                elif self.current_position > self.move_range[1]:
+                    self.current_position = self.move_range[1]
+            else:
+                setattr(self, param_name, value)
+        elif param_name == 'move_speed':
+            old_direction = self.direction
+            self.move_speed = value
+            self.direction = 1 if value >= 0 else -1
+            
+            if old_direction != self.direction:
+                import logging
+                logger = logging.getLogger("color_signal_system")
+                logger.info(f"Segment {self.segment_ID} direction changed: {old_direction} → {self.direction}")
         else:
             setattr(self, param_name, value)
-            
-        if param_name == 'move_range':
-            if self.current_position < self.move_range[0]:
-                self.current_position = self.move_range[0]
-            elif self.current_position > self.move_range[1]:
-                self.current_position = self.move_range[1]
     
     def update_position(self, fps: int):
         """
@@ -90,20 +110,35 @@ class LightSegment:
         self.time += dt
         
         delta = self.move_speed * dt
-        self.current_position += delta
+        new_position = self.current_position + delta
+        
+        total_length = sum(self.length)
         
         if self.is_edge_reflect:
-            if self.current_position < self.move_range[0]:
-                self.current_position = 2 * self.move_range[0] - self.current_position
-                self.move_speed *= -1
-            elif self.current_position > self.move_range[1]:
-                self.current_position = 2 * self.move_range[1] - self.current_position
-                self.move_speed *= -1
+            if new_position < self.move_range[0]:
+                new_position = self.move_range[0]
+                self.direction = 1 
+                self.move_speed = abs(self.move_speed)  
+                
+            elif new_position + total_length - 1 > self.move_range[1]:
+                new_position = self.move_range[1] - total_length + 1
+                self.direction = -1
+                self.move_speed = -abs(self.move_speed)
         else:
-            if self.current_position < self.move_range[0]:
-                self.current_position = self.move_range[1] - (self.move_range[0] - self.current_position)
-            elif self.current_position > self.move_range[1]:
-                self.current_position = self.move_range[0] + (self.current_position - self.move_range[1])
+            range_width = self.move_range[1] - self.move_range[0] + 1
+            if new_position < self.move_range[0]:
+                overshoot = self.move_range[0] - new_position
+                new_position = self.move_range[1] - overshoot + 1
+            elif new_position + total_length - 1 > self.move_range[1]:
+                overshoot = new_position + total_length - 1 - self.move_range[1]
+                new_position = self.move_range[0] + overshoot - 1
+                
+            if new_position < self.move_range[0]:
+                new_position = self.move_range[0]
+            elif new_position + total_length - 1 > self.move_range[1]:
+                new_position = self.move_range[1] - total_length + 1
+                
+        self.current_position = new_position
 
     def calculate_rgb(self, palette_name: str = "A") -> List[List[int]]:
         """
@@ -125,7 +160,9 @@ class LightSegment:
                 else:
                     rgb_values.append([255, 0, 0])
             except Exception as e:
-                print(f"Error getting color {color_idx} from palette: {e}")
+                import logging
+                logger = logging.getLogger("color_signal_system")
+                logger.error(f"Error getting color {color_idx} from palette: {e}")
                 rgb_values.append([255, 0, 0])
         
         while len(rgb_values) < 4:
@@ -148,17 +185,18 @@ class LightSegment:
         if not self.fade or not self.dimmer_time or len(self.dimmer_time) < 5 or self.dimmer_time[4] <= 0:
             return 1.0 
         
-        cycle_time = int(self.dimmer_time[4] * self.dimmer_time_ratio)
+        ratio = getattr(self, 'dimmer_time_ratio', 1.0)
+        cycle_time = int(self.dimmer_time[4] * ratio)
         
         if cycle_time <= 0:
             return 1.0
             
         current_time = int((self.time * 1000) % cycle_time)
         
-        fade_in_start = int(self.dimmer_time[0] * self.dimmer_time_ratio)
-        fade_in_end = int(self.dimmer_time[1] * self.dimmer_time_ratio)
-        fade_out_start = int(self.dimmer_time[2] * self.dimmer_time_ratio)
-        fade_out_end = int(self.dimmer_time[3] * self.dimmer_time_ratio)
+        fade_in_start = int(self.dimmer_time[0] * ratio)
+        fade_in_end = int(self.dimmer_time[1] * ratio)
+        fade_out_start = int(self.dimmer_time[2] * ratio)
+        fade_out_end = int(self.dimmer_time[3] * ratio)
 
         if current_time < fade_in_start:
             return 0.0
@@ -173,112 +211,73 @@ class LightSegment:
         else:
             return 0.0
 
-    def get_light_data(self, palette_name: str = "A") -> dict:
+    def get_light_data(self, palette: List[List[int]]) -> Dict[int, tuple[List[int], float]]:
         """
-        Get data for light rendering based on current segment state.
-        Considers position, color, transparency, and applies gradients and fading if enabled.
-        
-        Args:
-            palette_name: Name of the palette to use
-            
-        Returns:
-            Dictionary with segment rendering information
-        """
-        brightness = self.apply_dimming() if self.fade else 1.0
-        
-        segment_start = int(self.current_position - self.total_length / 2)
-        positions = [
-            segment_start,                          
-            segment_start + self.length[0],           
-            segment_start + self.length[0] + self.length[1],  
-            segment_start + self.total_length        
-        ]
+        Calculate the light data (color and transparency) for each LED covered by this segment.
 
-        if self.gradient and self.gradient_colors[0] == 1 and self.gradient_colors[1] >= 0 and self.gradient_colors[2] >= 0:
-            palette = DEFAULT_COLOR_PALETTES.get(palette_name, DEFAULT_COLOR_PALETTES["A"])
-            left_color = palette[self.gradient_colors[1]] if 0 <= self.gradient_colors[1] < len(palette) else [255, 0, 0]
-            right_color = palette[self.gradient_colors[2]] if 0 <= self.gradient_colors[2] < len(palette) else [0, 0, 255]
+        Args:
+            palette: The current color palette (list of RGB colors) being used by the effect.
+
+        Returns:
+            A dictionary mapping LED index to a tuple of (RGB color, transparency).
+        """
+        light_data = {}
+        brightness = self.apply_dimming()
+
+        segment_colors = self.color[:4]
+        while len(segment_colors) < 4:
+            segment_colors.append(segment_colors[-1] if segment_colors else 0)
             
-            colors = [
-                left_color,
-                interpolate_colors(left_color, right_color, 0.33),
-                interpolate_colors(left_color, right_color, 0.67),
-                right_color
-            ]
-        else:
-            colors = self.calculate_rgb(palette_name)
+        segment_transparencies = self.transparency[:4]
+        while len(segment_transparencies) < 4:
+            segment_transparencies.append(segment_transparencies[-1] if segment_transparencies else 1.0)
+
+        segment_lengths = self.length[:3]
+        while len(segment_lengths) < 3:
+            segment_lengths.append(segment_lengths[-1] if segment_lengths else 0)
         
-        if brightness < 1.0:
-            colors = [apply_brightness(color, brightness) for color in colors]
-        
-        light_data = {
-            'segment_id': self.segment_ID,
-            'brightness': brightness,
-            'positions': positions,
-            'colors': colors,
-            'transparency': self.transparency
-        }
-        
+        total_segment_length = sum(segment_lengths)
+        if total_segment_length <= 0:
+            return {}
+
+        base_rgb = []
+        for idx in segment_colors:
+            if 0 <= idx < len(palette):
+                base_rgb.append(palette[idx])
+            else:
+                base_rgb.append([255, 0, 0])
+
+        start_led = math.floor(self.current_position)
+        end_led = math.floor(self.current_position + total_segment_length - 1e-9)
+
+        for led_idx in range(start_led, end_led + 1):
+            relative_pos = led_idx - self.current_position
+            
+            relative_pos = max(0, min(relative_pos, total_segment_length - 1e-9))
+
+            interpolated_color = [0, 0, 0]
+            interpolated_transparency = 1.0
+            
+            if relative_pos < segment_lengths[0]:
+                c1, c2 = base_rgb[0], base_rgb[1]
+                tr1, tr2 = segment_transparencies[0], segment_transparencies[1]
+                t = relative_pos / segment_lengths[0] if segment_lengths[0] > 0 else 0
+            elif relative_pos < segment_lengths[0] + segment_lengths[1]:
+                c1, c2 = base_rgb[1], base_rgb[2]
+                tr1, tr2 = segment_transparencies[1], segment_transparencies[2]
+                t = (relative_pos - segment_lengths[0]) / segment_lengths[1] if segment_lengths[1] > 0 else 0
+            else:
+                c1, c2 = base_rgb[2], base_rgb[3]
+                tr1, tr2 = segment_transparencies[2], segment_transparencies[3]
+                t = (relative_pos - segment_lengths[0] - segment_lengths[1]) / segment_lengths[2] if segment_lengths[2] > 0 else 0
+
+            t = max(0.0, min(1.0, t))
+
+            interpolated_color = interpolate_colors(c1, c2, t)
+            interpolated_transparency = tr1 + (tr2 - tr1) * t
+            
+            final_color = apply_brightness(interpolated_color, brightness)
+            
+            light_data[led_idx] = (final_color, interpolated_transparency)
+            
         return light_data
-        
-    def to_dict(self) -> Dict:
-        """
-        Convert the segment to a dictionary representation for serialization.
-        
-        Returns:
-            Dictionary containing segment properties
-        """
-        data = {
-            "segment_ID": self.segment_ID,
-            "color": self.color,
-            "transparency": self.transparency,
-            "length": self.length,
-            "move_speed": self.move_speed,
-            "move_range": self.move_range,
-            "initial_position": self.initial_position,
-            "current_position": self.current_position,
-            "is_edge_reflect": self.is_edge_reflect,
-            "dimmer_time": self.dimmer_time,
-            "dimmer_time_ratio": self.dimmer_time_ratio,
-            "gradient": self.gradient,
-            "fade": self.fade,
-            "gradient_colors": self.gradient_colors
-        }
-            
-        return data
-        
-    @classmethod
-    def from_dict(cls, data: Dict):
-        """
-        Create a segment from a dictionary representation (deserialization).
-        
-        Args:
-            data: Dictionary containing segment properties
-            
-        Returns:
-            A new LightSegment instance
-        """
-        segment = cls(
-            segment_ID=data["segment_ID"],
-            color=data["color"],
-            transparency=data["transparency"],
-            length=data["length"],
-            move_speed=data["move_speed"],
-            move_range=data["move_range"],
-            initial_position=data["initial_position"],
-            is_edge_reflect=data["is_edge_reflect"],
-            dimmer_time=data["dimmer_time"],
-            dimmer_time_ratio=data.get("dimmer_time_ratio", 1.0) 
-        )
-
-        if "current_position" in data:
-            segment.current_position = data["current_position"] 
-
-        if "gradient" in data:
-            segment.gradient = data["gradient"]
-        if "fade" in data:
-            segment.fade = data["fade"]
-        if "gradient_colors" in data:
-            segment.gradient_colors = data["gradient_colors"]
-            
-        return segment
