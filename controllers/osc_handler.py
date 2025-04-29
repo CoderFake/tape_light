@@ -310,18 +310,50 @@ class OSCHandler:
             
         effect = scene.effects[effect_id]
         
-        if isinstance(palette_id, str) and palette_id in scene.palettes:
-            effect.current_palette = palette_id
-            for segment in effect.segments.values():
-                if hasattr(segment, 'calculate_rgb'):
-                    segment.rgb_color = segment.calculate_rgb(palette_id)
-            
-            if self.simulator:
-                self._update_simulator(scene_id, effect_id)
-                if hasattr(self.simulator, '_add_notification'):
-                    self.simulator._add_notification(f"Effect {effect_id} palette changed to {palette_id}")
+        if isinstance(palette_id, str):
+            if palette_id in scene.palettes:
+                effect.current_palette = palette_id
+                effect.set_palette(palette_id)
+                
+                logger.info(f"Set effect {effect_id} palette to {palette_id}")
+                
+                if self.simulator:
+                    self._update_simulator(scene_id, effect_id)
+                    if hasattr(self.simulator, '_add_notification'):
+                        self.simulator._add_notification(f"Effect {effect_id} palette changed to {palette_id}")
+            else:
+                logger.warning(f"Invalid palette ID: {palette_id} or palette not found in scene {scene_id}")
+        elif isinstance(palette_id, (int, float)):
+            palette_id = str(int(palette_id))
+            if palette_id in scene.palettes:
+                effect.current_palette = palette_id
+                effect.set_palette(palette_id)
+                
+                logger.info(f"Set effect {effect_id} palette to {palette_id} (from numeric value)")
+                
+                if self.simulator:
+                    self._update_simulator(scene_id, effect_id)
+                    if hasattr(self.simulator, '_add_notification'):
+                        self.simulator._add_notification(f"Effect {effect_id} palette changed to {palette_id}")
+            else:
+                palettes = sorted(scene.palettes.keys())
+                idx = int(palette_id)
+                if 0 <= idx < len(palettes):
+                    palette_key = palettes[idx]
+                    effect.current_palette = palette_key
+                    effect.set_palette(palette_key)
+                    
+                    logger.info(f"Set effect {effect_id} palette to {palette_key} (by index {idx})")
+                    
+                    if self.simulator:
+                        self._update_simulator(scene_id, effect_id)
+                        if hasattr(self.simulator, '_add_notification'):
+                            self.simulator._add_notification(f"Effect {effect_id} palette changed to {palette_key}")
+                else:
+                    logger.warning(f"Invalid palette index: {idx}, out of range (0-{len(palettes)-1})")
         else:
-            logger.warning(f"Invalid palette ID: {palette_id} or palette not found in scene {scene_id}")
+            logger.warning(f"Unsupported palette ID type: {type(palette_id)}")
+            
 
     def scene_effect_add_segment_callback(self, address, *args):
         """
