@@ -281,3 +281,64 @@ class LightSegment:
             light_data[led_idx] = (final_color, interpolated_transparency)
             
         return light_data
+
+    def to_dict(self):
+        segments_dict = {}
+        for segment_id, segment in self.segments.items():
+            if hasattr(segment, 'to_dict') and callable(segment.to_dict):
+                segments_dict[str(segment_id)] = segment.to_dict()
+            else:
+                segments_dict[str(segment_id)] = {
+                    "segment_ID": segment.segment_ID,
+                    "color": segment.color,
+                    "transparency": segment.transparency,
+                    "length": segment.length,
+                    "move_speed": segment.move_speed,
+                    "move_range": segment.move_range,
+                    "initial_position": segment.initial_position,
+                    "current_position": segment.current_position,
+                    "is_edge_reflect": segment.is_edge_reflect,
+                    "dimmer_time": segment.dimmer_time,
+                    "dimmer_time_ratio": getattr(segment, 'dimmer_time_ratio', 1.0),
+                    "gradient": getattr(segment, 'gradient', False),
+                    "fade": getattr(segment, 'fade', False),
+                    "gradient_colors": getattr(segment, 'gradient_colors', [0, -1, -1])
+                }
+            
+        return {
+            "effect_ID": self.effect_ID,
+            "led_count": self.led_count,
+            "fps": self.fps,
+            "time": self.time,
+            "current_palette": self.current_palette,
+            "segments": segments_dict
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        segment = cls(
+            segment_ID=data["segment_ID"],
+            color=data["color"],
+            transparency=data["transparency"],
+            length=data["length"],
+            move_speed=data["move_speed"],
+            move_range=data["move_range"],
+            initial_position=data["initial_position"],
+            is_edge_reflect=data["is_edge_reflect"],
+            dimmer_time=data["dimmer_time"],
+            dimmer_time_ratio=data.get("dimmer_time_ratio", 1.0)
+        )
+        
+        if "current_position" in data:
+            segment.current_position = data["current_position"]
+        
+        if "gradient" in data:
+            segment.gradient = data["gradient"]
+        
+        if "fade" in data:
+            segment.fade = data["fade"]
+        
+        if "gradient_colors" in data:
+            segment.gradient_colors = data["gradient_colors"]
+        
+        return segment
