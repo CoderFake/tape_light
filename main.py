@@ -127,8 +127,12 @@ def main():
             
             if not args.simulator_only and osc_handler:
                 osc_handler.set_simulator(simulator)
+                
+                if hasattr(scene_manager, 'osc_handler'):
+                    scene_manager.osc_handler = osc_handler
             
             simulator.run()
+            
         else:
             logger.info("Running in headless mode (no GUI)...")
             logger.info("Press Ctrl+C to exit")
@@ -136,6 +140,10 @@ def main():
             while True:
                 for scene in light_scenes.values():
                     scene.update()
+                    
+                if osc_handler and hasattr(osc_handler, 'send_led_binary_data'):
+                    osc_handler.send_led_binary_data()
+                    
                 time.sleep(1.0/args.fps)
                 
     except KeyboardInterrupt:
