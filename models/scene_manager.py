@@ -34,6 +34,7 @@ class SceneManager:
         self.transition_start_time = 0.0
         self.is_transitioning = False
         self.transition_opacity = 1.0
+        self.osc_handler = None
         
     def add_scene(self, scene_ID: int, scene: LightScene):
         self.scenes[scene_ID] = scene
@@ -119,7 +120,15 @@ class SceneManager:
                 self.next_palette_idx = None
 
         current_scene.update()
+
+        if hasattr(self, 'osc_handler') and self.osc_handler is not None:
+            self.osc_handler.send_led_binary_data()
     
+    def set_scene_manager_osc_handler(self):
+        if self.simulator and hasattr(self.simulator, 'scene_manager'):
+            self.simulator.scene_manager.osc_handler = self
+            logger.info("Registered OSCHandler with SceneManager for LED binary output")
+
     def get_led_output(self):
         if self.current_scene is None or self.current_scene not in self.scenes:
             return []
