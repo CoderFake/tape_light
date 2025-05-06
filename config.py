@@ -5,7 +5,10 @@ OUT_PORT = 5005
 DEFAULT_OSC_IP = "0.0.0.0"
 MAX_SEGMENTS = 8
 
-# Color Palettes
+LED_BINARY_OUT_IP = "127.0.0.1"
+LED_BINARY_OUT_PORT = 7000
+LED_BINARY_OSC_ADDRESS = "/light/serial"
+
 DEFAULT_COLOR_PALETTES = {
     "A": [
         [255, 0, 0],    # Red
