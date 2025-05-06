@@ -3,6 +3,8 @@ import re
 import sys
 import threading
 import json
+import struct
+import random
 from pythonosc import dispatcher, osc_server, udp_client
 
 sys.path.append('..')
@@ -21,7 +23,9 @@ from config import (
     DEFAULT_DIMMER_TIME,
     IN_PORT,
     OUT_PORT,
-    MAX_SEGMENTS
+    MAX_SEGMENTS,
+    LED_BINARY_OUT_IP,
+    LED_BINARY_OUT_PORT,
 )
 
 
@@ -68,14 +72,24 @@ class OSCHandler:
         
         self.client = udp_client.SimpleUDPClient(ip, self.out_port)
         
+        self.led_binary_client = udp_client.SimpleUDPClient(LED_BINARY_OUT_IP, LED_BINARY_OUT_PORT)
+        
         self.simulator = None
+        self.send_binary_enabled = True
+    
+        self.last_binary_send_time = 0
+        self.binary_send_interval = 1.0 / DEFAULT_FPS  
+        
         logger.info(f"OSC Handler initialized - IN port: {self.in_port}, OUT port: {self.out_port}")
+        logger.info(f"LED Binary output configured to {LED_BINARY_OUT_IP}:{LED_BINARY_OUT_PORT}")
     
     def setup_dispatcher(self):
         """
         Set up the OSC message dispatcher with appropriate message handlers.
         """
-        # Scene/Effect/Segment patterns
+        self.dispatcher.map("/scene/*/change_palette", self.scene_change_palette_callback)
+        self.dispatcher.map("/scene/*/effect/*/change_palette", self.effect_change_palette_callback)
+        
         self.dispatcher.map("/scene/*/effect/*/segment/*/*", self.scene_effect_segment_callback)
         self.dispatcher.map("/scene/*/effect/*/set_palette", self.scene_effect_palette_callback)
         self.dispatcher.map("/scene/*/set_palette", self.scene_palette_callback)
@@ -84,26 +98,33 @@ class OSCHandler:
         self.dispatcher.map("/scene/*/load_effects", self.scene_load_effects_callback)
         self.dispatcher.map("/scene/*/save_palettes", self.scene_save_palettes_callback)
         self.dispatcher.map("/scene/*/load_palettes", self.scene_load_palettes_callback)
+        self.dispatcher.map("/scene/*/effect/*/direct_palette", self.scene_effect_direct_palette_callback)
+        
         
         # Effect Management
         self.dispatcher.map("/scene/*/add_effect", self.scene_add_effect_callback)
         self.dispatcher.map("/scene/*/remove_effect", self.scene_remove_effect_callback)
+        self.dispatcher.map("/scene/*/change_effect", self.scene_change_effect_callback)
         
         # Segment Management
         self.dispatcher.map("/scene/*/effect/*/add_segment", self.scene_effect_add_segment_callback)
         self.dispatcher.map("/scene/*/effect/*/remove_segment", self.scene_effect_remove_segment_callback)
         
-        # Scene Manager patterns
+        # Scene Management
         self.dispatcher.map("/scene_manager/add_scene", self.scene_manager_add_scene_callback)
         self.dispatcher.map("/scene_manager/remove_scene", self.scene_manager_remove_scene_callback)
         self.dispatcher.map("/scene_manager/switch_scene", self.scene_manager_switch_scene_callback)
         self.dispatcher.map("/scene_manager/list_scenes", self.scene_manager_list_scenes_callback)
+        self.dispatcher.map("/scene_manager/load_scene", self.scene_manager_load_scene_callback)
         
         # Legacy patterns
         self.dispatcher.map("/effect/*/segment/*/*", self.legacy_effect_segment_callback)
         self.dispatcher.map("/effect/*/object/*/*", self.legacy_effect_object_callback)
         self.dispatcher.map("/palette/*", self.legacy_palette_callback)
         self.dispatcher.map("/request/init", self.init_callback)
+        
+        # Binary data output
+        self.dispatcher.map("/update_serial_output", self.update_serial_output_callback)
     
     def start_server(self):
         """
@@ -115,6 +136,8 @@ class OSCHandler:
             self.server_thread.daemon = True
             self.server_thread.start()
             logger.info(f"OSC server started on {self.ip}:{self.in_port}, sending responses to port {self.out_port}")
+            
+            self.set_scene_manager_osc_handler()
         except Exception as e:
             logger.error(f"Error starting OSC server: {e}")
             
@@ -134,7 +157,230 @@ class OSCHandler:
             simulator: The simulator instance
         """
         self.simulator = simulator
-    
+
+    def make_color_binary(self, colors):
+        response_data = b""
+        
+        for color in colors:
+            r = max(0, min(255, int(color[0])))
+            g = max(0, min(255, int(color[1])))
+            b = max(0, min(255, int(color[2])))
+            
+            response_data += struct.pack("BBBB", r, g, b, 0)
+        
+        return response_data
+
+    def send_led_binary_data(self):
+        import time
+        from config import LED_BINARY_OSC_ADDRESS
+        
+        current_time = time.time()
+        
+        if not self.send_binary_enabled or current_time - self.last_binary_send_time < self.binary_send_interval:
+            return
+        
+        self.last_binary_send_time = current_time
+        
+        led_colors = []
+        
+        if self.simulator and hasattr(self.simulator, 'scene_manager') and self.simulator.scene_manager:
+            led_colors = self.simulator.scene_manager.get_led_output()
+        elif self.light_scenes:
+            current_scene_id = None
+            if self.simulator and hasattr(self.simulator, 'active_scene_id'):
+                current_scene_id = self.simulator.active_scene_id
+            
+            if current_scene_id is None and self.light_scenes:
+                current_scene_id = min(self.light_scenes.keys())
+                
+            if current_scene_id in self.light_scenes:
+                led_colors = self.light_scenes[current_scene_id].get_led_output()
+        
+        if not led_colors:
+            return
+        
+        try:
+            binary_data = self.make_color_binary(led_colors)
+            
+            self.led_binary_client.send_message(LED_BINARY_OSC_ADDRESS, binary_data)
+            
+            if random.random() < 0.01:  
+                logger.debug(f"Sent LED binary data: {len(led_colors)} LEDs, {len(binary_data)} bytes")
+        except Exception as e:
+            logger.error(f"Error sending LED binary data: {e}")
+
+    def update_serial_output_callback(self, address, *args):
+        """
+        Handle OSC messages for enabling/disabling serial output and updating parameters.
+        
+        Args:
+            address: OSC address pattern
+            *args: OSC message arguments (enabled, ip, port)
+        """
+        if address != "/update_serial_output":
+            return
+        
+        try:
+            if len(args) >= 1:
+                enabled = args[0]
+                if isinstance(enabled, (int, float)):
+                    self.send_binary_enabled = bool(enabled)
+                    logger.info(f"Serial output {'enabled' if self.send_binary_enabled else 'disabled'}")
+                    
+            if len(args) >= 2:
+                from config import LED_BINARY_OUT_IP, LED_BINARY_OUT_PORT
+                ip = args[1]
+                port = LED_BINARY_OUT_PORT
+                
+                if len(args) >= 3:
+                    try:
+                        port = int(args[2])
+                    except:
+                        pass
+                    
+                self.led_binary_client = udp_client.SimpleUDPClient(ip, port)
+                logger.info(f"Updated LED binary output to {ip}:{port}")
+                
+            if len(args) >= 4:
+                try:
+                    fps = float(args[3])
+                    if fps > 0:
+                        self.binary_send_interval = 1.0 / fps
+                        logger.info(f"Updated LED binary output rate to {fps} FPS")
+                except:
+                    pass
+                    
+            self.client.send_message("/serial_output_updated", self.send_binary_enabled)
+
+        except Exception as e:
+            logger.error(f"Error updating serial output: {e}")
+
+    def scene_effect_direct_palette_callback(self, address, *args):
+        """
+        Handle OSC messages for immediately setting the current palette for a specific effect.
+        
+        Args:
+            address: OSC address pattern (/scene/{scene_id}/effect/{effect_id}/direct_palette)
+            *args: OSC message arguments (palette_ID)
+        """
+        pattern = r"/scene/(\d+)/effect/(\d+)/direct_palette"
+        match = re.match(pattern, address)
+        
+        if not match:
+            logger.warning(f"Invalid address pattern: {address}")
+            return
+            
+        scene_id = int(match.group(1))
+        effect_id = int(match.group(2))
+        
+        if len(args) < 1:
+            logger.warning("Missing palette_ID parameter")
+            return
+            
+        palette_id = args[0]
+        
+        logger.info(f"Received OSC direct_palette: {address} - Palette: {palette_id}")
+        
+        if scene_id not in self.light_scenes:
+            logger.warning(f"Scene {scene_id} not found")
+            return
+            
+        scene = self.light_scenes[scene_id]
+        
+        if effect_id not in scene.effects:
+            logger.warning(f"Effect {effect_id} not found in scene {scene_id}")
+            return
+            
+        effect = scene.effects[effect_id]
+        
+        target_palette = None
+        if isinstance(palette_id, str):
+            if palette_id in scene.palettes:
+                target_palette = palette_id
+        elif isinstance(palette_id, (int, float)):
+            palette_keys = sorted(scene.palettes.keys())
+            idx = int(palette_id)
+            if 0 <= idx < len(palette_keys):
+                target_palette = palette_keys[idx]
+        
+        if target_palette is not None:
+            effect.current_palette = target_palette
+            effect.set_palette(target_palette)
+            
+            logger.info(f"Immediately set palette to {target_palette} for effect {effect_id} in scene {scene_id}")
+            
+            if self.simulator:
+                self._update_simulator(scene_id, effect_id)
+        else:
+            logger.warning(f"Invalid palette ID: {palette_id} or palette not found in scene {scene_id}")
+
+    def effect_change_palette_callback(self, address, *args):
+        """
+        Handle OSC messages for changing the palette for a specific effect with animation.
+        
+        Args:
+            address: OSC address pattern (/scene/{scene_id}/effect/{effect_id}/change_palette)
+            *args: OSC message arguments (palette_ID)
+        """
+        pattern = r"/scene/(\d+)/effect/(\d+)/change_palette"
+        match = re.match(pattern, address)
+        
+        if not match:
+            logger.warning(f"Invalid address pattern: {address}")
+            return
+            
+        scene_id = int(match.group(1))
+        effect_id = int(match.group(2))
+        
+        if len(args) < 1:
+            logger.warning("Missing palette_ID parameter")
+            return
+            
+        palette_id = args[0]
+        
+        logger.info(f"Received OSC change_palette: {address} - Palette: {palette_id}")
+        
+        if scene_id not in self.light_scenes:
+            logger.warning(f"Scene {scene_id} not found")
+            return
+            
+        scene = self.light_scenes[scene_id]
+        
+        if effect_id not in scene.effects:
+            logger.warning(f"Effect {effect_id} not found in scene {scene_id}")
+            return
+            
+        effect = scene.effects[effect_id]
+        
+        target_palette = None
+        if isinstance(palette_id, str):
+            if palette_id in scene.palettes:
+                target_palette = palette_id
+        elif isinstance(palette_id, (int, float)):
+            palette_keys = sorted(scene.palettes.keys())
+            idx = int(palette_id)
+            if 0 <= idx < len(palette_keys):
+                target_palette = palette_keys[idx]
+        
+        if target_palette is not None:
+            scene.set_transition_params(
+                next_effect_idx=None,
+                next_palette_idx=target_palette,
+                fade_in_time=1.0,
+                fade_out_time=1.0 
+            )
+            
+            scene.palette_transition_active = True
+            
+            logger.info(f"Started palette transition to {target_palette} for effect {effect_id} in scene {scene_id}")
+            
+            if self.simulator:
+                self._update_simulator(scene_id, effect_id)
+                if hasattr(self.simulator, '_add_notification'):
+                    self.simulator._add_notification(f"Đang chuyển sang palette {target_palette}")
+        else:
+            logger.warning(f"Invalid palette ID: {palette_id} or palette not found in scene {scene_id}")
+
     def scene_add_effect_callback(self, address, *args):
         """
         Handle OSC messages for adding a new effect to a scene.
@@ -211,6 +457,65 @@ class OSCHandler:
             if self.simulator and hasattr(self.simulator, '_add_notification'):
                 self.simulator._add_notification(f"Error while adding effect: {e}")
 
+    def scene_change_effect_callback(self, address, *args):
+        """
+        Handle OSC messages for changing the current effect within a scene with animation.
+        
+        Args:
+            address: OSC address pattern (/scene/{scene_id}/change_effect)
+            *args: OSC message arguments (effect_ID)
+        """
+        pattern = r"/scene/(\d+)/change_effect"
+        match = re.match(pattern, address)
+        
+        if not match:
+            logger.warning(f"Invalid address pattern: {address}")
+            return
+            
+        scene_id = int(match.group(1))
+        
+        if len(args) < 1:
+            logger.warning("Missing effect_ID parameter")
+            return
+            
+        try:
+            effect_id = int(args[0])
+            
+            logger.info(f"Received change_effect request: Scene {scene_id}, Effect {effect_id}")
+            
+            if scene_id not in self.light_scenes:
+                logger.warning(f"Scene {scene_id} not found")
+                return
+                
+            scene = self.light_scenes[scene_id]
+            
+            if effect_id not in scene.effects:
+                logger.warning(f"Effect {effect_id} not found in scene {scene_id}")
+                return
+            
+            if scene.current_effect_ID == effect_id:
+                logger.info(f"Effect {effect_id} is already active in scene {scene_id}")
+                return
+                
+            scene.set_transition_params(
+                next_effect_idx=effect_id,
+                next_palette_idx=None,
+                fade_in_time=1.0,  
+                fade_out_time=1.0
+            )
+            
+            scene.effect_transition_active = True
+            
+            logger.info(f"Started transition to effect {effect_id} in scene {scene_id}")
+            
+            if self.simulator:
+                self._update_simulator(scene_id, effect_id)
+            
+            self.client.send_message(f"/scene/{scene_id}/effect_changing", effect_id)
+                
+        except Exception as e:
+            logger.error(f"Error changing effect: {e}")
+
     def scene_remove_effect_callback(self, address, *args):
         """
         Handle OSC messages for removing an effect from a scene.
@@ -262,15 +567,69 @@ class OSCHandler:
             
             if self.simulator:
                 self._update_simulator(scene_id)
-                if hasattr(self.simulator, '_add_notification'):
-                    self.simulator._add_notification(f"Đã xóa effect {effect_id} khỏi scene {scene_id}")
             
             self.client.send_message(f"/scene/{scene_id}/effect_removed", effect_id)
             
         except Exception as e:
             logger.error(f"Error removing effect: {e}")
-            if self.simulator and hasattr(self.simulator, '_add_notification'):
-                self.simulator._add_notification(f"Lỗi khi xóa effect: {e}")
+
+    def scene_change_palette_callback(self, address, *args):
+        """
+        Handle OSC messages for changing the palette for an entire scene with animation.
+        
+        Args:
+            address: OSC address pattern (/scene/{scene_id}/change_palette)
+            *args: OSC message arguments (palette_ID)
+        """
+        pattern = r"/scene/(\d+)/change_palette"
+        match = re.match(pattern, address)
+        
+        if not match:
+            logger.warning(f"Invalid address pattern: {address}")
+            return
+            
+        scene_id = int(match.group(1))
+        
+        if len(args) < 1:
+            logger.warning("Missing palette_ID parameter")
+            return
+            
+        palette_id = args[0]
+        
+        logger.info(f"Received OSC change_palette for scene: {address} - Palette: {palette_id}")
+        
+        if scene_id not in self.light_scenes:
+            logger.warning(f"Scene {scene_id} not found")
+            return
+            
+        scene = self.light_scenes[scene_id]
+        
+        target_palette = None
+        if isinstance(palette_id, str):
+            if palette_id in scene.palettes:
+                target_palette = palette_id
+        elif isinstance(palette_id, (int, float)):
+            palette_keys = sorted(scene.palettes.keys())
+            idx = int(palette_id)
+            if 0 <= idx < len(palette_keys):
+                target_palette = palette_keys[idx]
+        
+        if target_palette is not None:
+            scene.set_transition_params(
+                next_effect_idx=None,
+                next_palette_idx=target_palette,
+                fade_in_time=1.0, 
+                fade_out_time=1.0 
+            )
+            
+            scene.palette_transition_active = True
+            
+            logger.info(f"Started palette transition to {target_palette} for scene {scene_id}")
+            
+            if self.simulator:
+                self._update_simulator(scene_id)
+        else:
+            logger.warning(f"Invalid palette ID: {palette_id} or palette not found in scene {scene_id}")
 
     def scene_effect_palette_callback(self, address, *args):
         """
@@ -353,8 +712,7 @@ class OSCHandler:
                     logger.warning(f"Invalid palette index: {idx}, out of range (0-{len(palettes)-1})")
         else:
             logger.warning(f"Unsupported palette ID type: {type(palette_id)}")
-            
-
+           
     def scene_effect_add_segment_callback(self, address, *args):
         """
         Handle OSC messages for adding a new segment to an effect.
@@ -537,6 +895,68 @@ class OSCHandler:
             
         except Exception as e:
             logger.error(f"Error listing scenes: {e}")
+
+    def scene_manager_load_scene_callback(self, address, *args):
+        """
+        Handle OSC messages for loading an entire scene from a JSON file.
+        
+        Args:
+            address: OSC address pattern
+            *args: OSC message arguments (file_path, scene_id)
+        """
+        if address != "/scene_manager/load_scene" or len(args) < 1:
+            return
+            
+        file_path = args[0]
+        
+        if not isinstance(file_path, str):
+            file_path = str(file_path)
+        
+        target_scene_id = None
+        if len(args) >= 2 and args[1] is not None:
+            try:
+                target_scene_id = int(args[1])
+            except:
+                pass
+        
+        logger.info(f"Received load_scene request from file: {file_path}")
+        
+        try:
+            import os
+            if not os.path.isabs(file_path):
+                file_path = os.path.abspath(file_path)
+                
+            if not os.path.exists(file_path):
+                logger.warning(f"File not found: {file_path}")
+                self.client.send_message("/scene_manager/load_error", f"File not found: {file_path}")
+                if self.simulator and hasattr(self.simulator, '_add_notification'):
+                    self.simulator._add_notification(f"Không tìm thấy file: {file_path}")
+                return
+                
+            from models.light_scene import LightScene
+            new_scene = LightScene.load_from_json(file_path)
+            
+            if target_scene_id is not None:
+                new_scene.scene_ID = target_scene_id
+                
+            self.light_scenes[new_scene.scene_ID] = new_scene
+            
+            if hasattr(self.simulator, 'scene_manager') and self.simulator.scene_manager:
+                self.simulator.scene_manager.add_scene(new_scene.scene_ID, new_scene)
+                self.simulator.scene_manager.switch_scene(new_scene.scene_ID)
+            
+            logger.info(f"Successfully loaded scene from {file_path} as scene {new_scene.scene_ID}")
+            
+            self.client.send_message("/scene_manager/scene_loaded", new_scene.scene_ID)
+            
+            if self.simulator:
+                self._update_simulator(new_scene.scene_ID)
+                    
+        except Exception as e:
+            logger.error(f"Error loading scene: {e}")
+            self.client.send_message("/scene_manager/load_error", str(e))
+            if self.simulator and hasattr(self.simulator, '_add_notification'):
+                self.simulator._add_notification(f"Error loading scene: {e}")
 
     def scene_effect_segment_callback(self, address, *args):
         """
@@ -773,7 +1193,7 @@ class OSCHandler:
                 self._update_simulator(scene_id)
                 if hasattr(self.simulator, '_add_notification'):
                     self.simulator._add_notification(f"Updated palettes for scene {scene_id}")
-    
+
     def scene_save_effects_callback(self, address, *args):
         """
         Handle OSC messages for saving effects to a JSON file.
@@ -790,9 +1210,17 @@ class OSCHandler:
             return
             
         scene_id = int(match.group(1))
+        
+        if len(args) < 1:
+            logger.warning("Missing file_path parameter")
+            return
+            
         file_path = args[0]
         
-        logger.info(f"Received OSC: {address} - {args}")
+        if not isinstance(file_path, str):
+            file_path = str(file_path)
+        
+        logger.info(f"Received OSC: {address} - Saving to file: {file_path}")
         
         if scene_id not in self.light_scenes:
             logger.warning(f"Scene {scene_id} not found")
@@ -807,16 +1235,25 @@ class OSCHandler:
                     if hasattr(segment, 'time'):
                         segment.time = 0.0
                         
+            import os
+            if not os.path.isabs(file_path):
+                file_path = os.path.abspath(file_path)
+                
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
             scene.save_to_json(file_path)
-            logger.info(f"Saved effects configuration to {file_path}")
+            logger.info(f"Successfully saved effects configuration to {file_path}")
+            
+            self.client.send_message(f"/scene/{scene_id}/effects_saved", file_path)
             
             if self.simulator and hasattr(self.simulator, '_add_notification'):
-                self.simulator._add_notification(f"Saved effects to {file_path}")
+                self.simulator._add_notification(f"Đã lưu effects vào {file_path}")
         except Exception as e:
             logger.error(f"Error saving effects configuration: {e}")
+            self.client.send_message(f"/scene/{scene_id}/save_error", str(e))
             if self.simulator and hasattr(self.simulator, '_add_notification'):
-                self.simulator._add_notification(f"Error saving: {e}")
-    
+                self.simulator._add_notification(f"Lỗi khi lưu: {e}")
+
     def scene_load_effects_callback(self, address, *args):
         """
         Handle OSC messages for loading effects from a JSON file.
@@ -833,25 +1270,50 @@ class OSCHandler:
             return
             
         scene_id = int(match.group(1))
+        
+        if len(args) < 1:
+            logger.warning("Missing file_path parameter")
+            return
+            
         file_path = args[0]
         
-        logger.info(f"Received OSC: {address} - {args}")
+        if not isinstance(file_path, str):
+            file_path = str(file_path)
+        
+        logger.info(f"Received OSC: {address} - Loading from file: {file_path}")
         
         try:
+            import os
+            if not os.path.isabs(file_path):
+                file_path = os.path.abspath(file_path)
+                
+            if not os.path.exists(file_path):
+                logger.warning(f"File not found: {file_path}")
+                self.client.send_message(f"/scene/{scene_id}/load_error", f"File not found: {file_path}")
+                if self.simulator and hasattr(self.simulator, '_add_notification'):
+                    self.simulator._add_notification(f"Không tìm thấy file: {file_path}")
+                return
+            
+            from models.light_scene import LightScene
             new_scene = LightScene.load_from_json(file_path)
+            
             new_scene.scene_ID = scene_id
+            
             self.light_scenes[scene_id] = new_scene
-            logger.info(f"Loaded effects configuration from {file_path}")
+            logger.info(f"Successfully loaded effects from {file_path}")
+            
+            self.client.send_message(f"/scene/{scene_id}/effects_loaded", file_path)
             
             if self.simulator:
                 self._update_simulator(scene_id)
                 if hasattr(self.simulator, '_add_notification'):
-                    self.simulator._add_notification(f"Loaded effects from {file_path}")
+                    self.simulator._add_notification(f"Đã tải effects từ {file_path}")
         except Exception as e:
-            logger.error(f"Error loading effects configuration: {e}")
+            logger.error(f"Error loading effects: {e}")
+            self.client.send_message(f"/scene/{scene_id}/load_error", str(e))
             if self.simulator and hasattr(self.simulator, '_add_notification'):
-                self.simulator._add_notification(f"Error loading: {e}")
-    
+                self.simulator._add_notification(f"Error loading effects: {e}")
+                
     def scene_save_palettes_callback(self, address, *args):
         """
         Handle OSC messages for saving palettes to a JSON file.
@@ -868,9 +1330,17 @@ class OSCHandler:
             return
             
         scene_id = int(match.group(1))
+        
+        if len(args) < 1:
+            logger.warning("Missing file_path parameter")
+            return
+            
         file_path = args[0]
         
-        logger.info(f"Received OSC: {address} - {args}")
+        if not isinstance(file_path, str):
+            file_path = str(file_path)
+        
+        logger.info(f"Received OSC: {address} - Saving palettes to: {file_path}")
         
         if scene_id not in self.light_scenes:
             logger.warning(f"Scene {scene_id} not found")
@@ -879,15 +1349,25 @@ class OSCHandler:
         scene = self.light_scenes[scene_id]
         
         try:
+            import os
+            if not os.path.isabs(file_path):
+                file_path = os.path.abspath(file_path)
+                
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
             scene.save_palettes_to_json(file_path)
-            logger.info(f"Saved palettes to {file_path}")
+            logger.info(f"Successfully saved palettes to {file_path}")
+            
+            self.client.send_message(f"/scene/{scene_id}/palettes_saved", file_path)
+            
             if self.simulator and hasattr(self.simulator, '_add_notification'):
                 self.simulator._add_notification(f"Đã lưu bảng màu vào {file_path}")
         except Exception as e:
             logger.error(f"Error saving palettes: {e}")
+            self.client.send_message(f"/scene/{scene_id}/save_error", str(e))
             if self.simulator and hasattr(self.simulator, '_add_notification'):
-                self.simulator._add_notification(f"Lỗi khi lưu bảng màu: {e}")
-    
+                self.simulator._add_notification(f"Error while saving palettes: {e}")
+
     def scene_load_palettes_callback(self, address, *args):
         """
         Handle OSC messages for loading palettes from a JSON file.
@@ -904,9 +1384,17 @@ class OSCHandler:
             return
             
         scene_id = int(match.group(1))
+        
+        if len(args) < 1:
+            logger.warning("Missing file_path parameter")
+            return
+            
         file_path = args[0]
         
-        logger.info(f"Received OSC: {address} - {args}")
+        if not isinstance(file_path, str):
+            file_path = str(file_path)
+        
+        logger.info(f"Received OSC: {address} - Loading palettes from: {file_path}")
         
         if scene_id not in self.light_scenes:
             logger.warning(f"Scene {scene_id} not found")
@@ -915,8 +1403,21 @@ class OSCHandler:
         scene = self.light_scenes[scene_id]
         
         try:
+            import os
+            if not os.path.isabs(file_path):
+                file_path = os.path.abspath(file_path)
+                
+            if not os.path.exists(file_path):
+                logger.warning(f"File not found: {file_path}")
+                self.client.send_message(f"/scene/{scene_id}/load_error", f"File not found: {file_path}")
+                if self.simulator and hasattr(self.simulator, '_add_notification'):
+                    self.simulator._add_notification(f"File not found: {file_path}")
+                return
+                
             scene.load_palettes_from_json(file_path)
-            logger.info(f"Loaded palettes from {file_path}")
+            logger.info(f"Successfully loaded palettes from {file_path}")
+            
+            self.client.send_message(f"/scene/{scene_id}/palettes_loaded", file_path)
             
             if self.simulator:
                 self._update_simulator(scene_id)
@@ -924,9 +1425,10 @@ class OSCHandler:
                     self.simulator._add_notification(f"Đã tải bảng màu từ {file_path}")
         except Exception as e:
             logger.error(f"Error loading palettes: {e}")
+            self.client.send_message(f"/scene/{scene_id}/load_error", str(e))
             if self.simulator and hasattr(self.simulator, '_add_notification'):
-                self.simulator._add_notification(f"Lỗi khi tải bảng màu: {e}")
-    
+                self.simulator._add_notification(f"Error loading palettes: {e}")
+
     def scene_manager_add_scene_callback(self, address, *args):
         """
         Handle OSC messages for adding a new scene.
@@ -1215,6 +1717,11 @@ class OSCHandler:
             if hasattr(self.simulator, '_add_notification'):
                 self.simulator._add_notification(f"Đã cập nhật bảng màu {palette_id}")
     
+    def set_scene_manager_osc_handler(self):
+        if self.simulator and hasattr(self.simulator, 'scene_manager'):
+            self.simulator.scene_manager.osc_handler = self
+            logger.info("Registered OSCHandler with SceneManager for LED binary output")
+
     def init_callback(self, address, *args):
         """
         Handle initialization request from clients.
