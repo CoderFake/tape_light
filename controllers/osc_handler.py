@@ -99,6 +99,7 @@ class OSCHandler:
         self.dispatcher.map("/scene/*/save_palettes", self.scene_save_palettes_callback)
         self.dispatcher.map("/scene/*/load_palettes", self.scene_load_palettes_callback)
         self.dispatcher.map("/scene/*/effect/*/direct_palette", self.scene_effect_direct_palette_callback)
+        self.dispatcher.map("/scene_manager/load_scene_data", self.scene_manager_load_scene_data_callback)
         
         
         # Effect Management
@@ -208,6 +209,97 @@ class OSCHandler:
                 logger.debug(f"Sent LED binary data: {len(led_colors)} LEDs, {len(binary_data)} bytes")
         except Exception as e:
             logger.error(f"Error sending LED binary data: {e}")
+
+    def scene_manager_load_scene_data_callback(self, address, *args):
+        """
+        Handle OSC messages for loading scene data directly from JSON content.
+        
+        Args:
+            address: OSC address pattern
+            *args: OSC message arguments (json_data, scene_id)
+        """
+        if address != "/scene_manager/load_scene_data" or len(args) < 1:
+            return
+            
+        try:
+            json_data = args[0]
+            target_scene_id = None
+            
+            if len(args) >= 2 and args[1] is not None:
+                try:
+                    target_scene_id = int(args[1])
+                except:
+                    pass
+            
+            logger.info(f"Received OSC load_scene_data: {address} - Scene ID: {target_scene_id}")
+            
+            try:
+                scene_data = json.loads(json_data)
+            except:
+                logger.warning(f"Json data is not valid: {json_data}")
+                if self.simulator and hasattr(self.simulator, '_add_notification'):
+                    self.simulator._add_notification(f"Json data is not valid: {json_data}")
+                return
+                
+            from models.light_scene import LightScene
+            new_scene = LightScene(scene_ID=1)
+            
+            try:
+                if target_scene_id is not None:
+                    new_scene.scene_ID = target_scene_id
+                    
+                if "palettes" in scene_data:
+                    new_scene.palettes = scene_data["palettes"]
+                
+                if "current_palette" in scene_data:
+                    new_scene.current_palette = scene_data["current_palette"]
+
+                if "effects" in scene_data:
+                    for effect_id_str, effect_data in scene_data["effects"].items():
+                        from models.light_effect import LightEffect
+                        effect_id = int(effect_id_str)
+                        
+                        effect = LightEffect(
+                            effect_ID=effect_id,
+                            led_count=effect_data.get("led_count", DEFAULT_LED_COUNT),
+                            fps=effect_data.get("fps", DEFAULT_FPS)
+                        )
+                        
+                        if "segments" in effect_data:
+                            for seg_id_str, seg_data in effect_data["segments"].items():
+                                from models.light_segment import LightSegment
+                                segment = LightSegment.from_dict(seg_data)
+                                effect.add_segment(int(seg_id_str), segment)
+                        
+                        new_scene.add_effect(effect_id, effect)
+                
+                if "current_effect_ID" in scene_data and scene_data["current_effect_ID"] is not None:
+                    new_scene.current_effect_ID = scene_data["current_effect_ID"]
+                
+                self.light_scenes[new_scene.scene_ID] = new_scene
+                
+                if hasattr(self.simulator, 'scene_manager') and self.simulator.scene_manager:
+                    self.simulator.scene_manager.add_scene(new_scene.scene_ID, new_scene)
+                    self.simulator.scene_manager.switch_scene(new_scene.scene_ID)
+                
+                logger.info(f"Loading successfully {new_scene.scene_ID}")
+                
+                self.client.send_message("/scene_manager/scene_loaded", new_scene.scene_ID)
+                
+                if self.simulator:
+                    self._update_simulator(new_scene.scene_ID)
+                    if hasattr(self.simulator, '_add_notification'):
+                        self.simulator._add_notification(f"Loaded sence with ID {new_scene.scene_ID}")
+                        
+            except Exception as e:
+                logger.error(f"Error while proccessing scene: {e}")
+                if self.simulator and hasattr(self.simulator, '_add_notification'):
+                    self.simulator._add_notification(f"Error while proccessing scene: {e}")
+                
+        except Exception as e:
+            logger.error(f"Error while proccessing scene: {e}")
+            if self.simulator and hasattr(self.simulator, '_add_notification'):
+                self.simulator._add_notification(f"Error while proccessing scene: {e}")
 
     def update_serial_output_callback(self, address, *args):
         """
